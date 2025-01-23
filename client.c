@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <rdma/rdma_cma.h>
 #include <openssl/sha.h>
@@ -102,6 +103,7 @@ int main(int argc, char *argv[]) {
     struct ibv_qp_init_attr qp_attr;
     char *buffer;
     int ret;
+    clock_t start, end;
 
     int dst_port = 23456;
     size_t buffer_size = 1024 * 1024 * 100;
@@ -248,7 +250,7 @@ int main(int argc, char *argv[]) {
     rdma_ack_cm_event(event);
 
     printf("Connected to server!\n");
-
+    start = clock();
     struct ibv_send_wr wr, *bad_wr = NULL;
     struct ibv_sge sge;
 
@@ -281,6 +283,10 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int) wc.wr_id);
         return 1;
     }
+    end = clock();
+    double elapsed_time_ms = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+
+    printf("Execution time: %.3f ms\n", elapsed_time_ms);
 
     printf("Message sent to server!\n");
 
