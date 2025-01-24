@@ -7,12 +7,12 @@ This project implements an RDMA (Remote Direct Memory Access) client-server appl
 ## Usage
 ### Server
 ```bash
-Usage: ./server -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>
+Usage: ./client -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>
 ```
 
 ### client
 ```bash
-Usage: ./client -p <dst-port> -s <buffer-size> -i <dst-ip> -v <validate> -h <help>
+Usage: ./server -p <dst-port> -s <buffer-size> -i <dst-ip> -v <validate> -h <help>
 ```
 
 ## Arguments
