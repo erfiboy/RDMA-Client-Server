@@ -6,92 +6,16 @@
 #include <arpa/inet.h>
 #include <rdma/rdma_cma.h>
 #include <openssl/sha.h>
-#include <string.h>
-#include <stdio.h>
 
-// Function to compute hash for a memory region
-void compute_mr_hash(struct ibv_mr *mr, unsigned char *output) {
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, mr->addr, mr->length);
-    SHA256_Final(output, &sha256);
-}
+// Function declarations
+void compute_mr_hash(struct ibv_mr *mr, unsigned char *output);
+void print_hash(const unsigned char *hash, size_t length);
+int print_mr_hashes(struct ibv_mr *mr1);
+void initialize_mr_random(struct ibv_mr *mr);
+int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, int *src_port, char **dst_ip, char **src_ip, int *validate, int *fill_memory);
 
-// Function to print the hash
-void print_hash(const unsigned char *hash, size_t length) {
-    for (size_t i = 0; i < length; i++) {
-        printf("%02x", hash[i]);
-    }
-    printf("\n");
-}
-
-// Function to compare memory regions
-int print_mr_hashes(struct ibv_mr *mr1) {
-    unsigned char hash1[SHA256_DIGEST_LENGTH];
-
-    // Compute hashes for both memory regions
-    compute_mr_hash(mr1, hash1);
-
-    // Print the hashes for debugging
-    printf("Hash of MR1: ");
-    print_hash(hash1, SHA256_DIGEST_LENGTH);
-}
-
-void initialize_mr_random(struct ibv_mr *mr) {
-    if (!mr || !mr->addr || mr->length == 0) {
-        fprintf(stderr, "Invalid memory region.\n");
-        return;
-    }
-
-    uint8_t *buffer = (uint8_t *)mr->addr;
-    size_t length = mr->length;
-
-    // Seed the random number generator
-    srand(time(NULL));
-
-    // Fill the memory region with random bytes
-    for (size_t i = 0; i < length; i++) {
-        buffer[i] = rand() % 256; // Random byte (0-255)
-    }
-}
-
-int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, int *src_port, char **dst_ip,  char **src_ip, int *validate, int *fill_memory) {
-    int opt;
-    while ((opt = getopt(argc, argv, "d:s:p:r:i:vfh")) != -1) { // Added 'i' for IP address
-        switch (opt) {
-            case 'd': // Destination Port
-                *dst_port = atoi(optarg);
-                break;
-            case 's': // Buffer Size
-                *buffer_size = (size_t)atol(optarg);
-                break;
-            case 'p': // Source Port
-                *src_port = atoi(optarg);
-                break;
-            case 'r': // Destination IP
-                *dst_ip = optarg;
-                break;
-            case 'i': // Destination IP
-                *src_ip = optarg;
-                break;
-            case 'v': // Feature Flag
-                *validate = 1; // Enable feature if -f is present
-                break;
-            case 'f': // Feature Flag
-                *fill_memory = 1; // Enable feature if -f is present
-                break;
-            case 'h':
-                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
-                return -1;
-            default:
-                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
-                return -1;
-        }
-    }
-    return 0;
-}
-
-int main(int argc, char *argv[]) {
+// The refactored function that performs the RDMA logic
+int perform_rdma_operation(int src_port, int dst_port, size_t buffer_size, char *dst_ip, char *src_ip, int validate, int fill_memory) {
     struct rdma_event_channel *ec = NULL;
     struct rdma_cm_id *id = NULL;
     struct rdma_cm_event *event = NULL;
@@ -105,24 +29,12 @@ int main(int argc, char *argv[]) {
     int ret;
     clock_t start, end;
 
-    int dst_port = 23456;
-    size_t buffer_size = 1024 * 1024 * 100;
-    int src_port = 12345;
-    char *dst_ip = "127.0.0.1"; // Default to localhost
-    char *src_ip = "127.0.0.1"; // Default to localhost
-    int validate = 0, fill_memory = 0;
-
-    if (parse_arguments(argc, argv, &dst_port, &buffer_size, &src_port, &dst_ip, &src_ip, &validate, &fill_memory) < 0) {
-        return 1; // Exit if parsing failed
-    }
-
     // Bind the socket to the specific source port
     struct sockaddr_in src_addr;
     memset(&src_addr, 0, sizeof(src_addr));
     src_addr.sin_family = AF_INET;
     src_addr.sin_port = htons(src_port);  // Set the desired source port
     inet_pton(AF_INET, src_ip, &src_addr.sin_addr);
-
 
     ec = rdma_create_event_channel();
     if (!ec) {
@@ -219,10 +131,10 @@ int main(int argc, char *argv[]) {
         perror("ibv_reg_mr failed");
         return 1;
     }
-    if (fill_memory){
+    if (fill_memory) {
         initialize_mr_random(mr);
     }
-    if (validate){
+    if (validate) {
         print_mr_hashes(mr);
     }
 
@@ -302,3 +214,112 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
+// Main function with the loop
+int main(int argc, char *argv[]) {
+    int dst_port = 23456;
+    size_t buffer_size = 1024 * 1024 * 100;
+    int src_port_start = 12345; // Start of source ports range
+    int src_port_end = 12355;   // End of source ports range
+    char *dst_ip = "127.0.0.1"; // Default to localhost
+    char *src_ip = "127.0.0.1"; // Default to localhost
+    int validate = 0, fill_memory = 0;
+
+    if (parse_arguments(argc, argv, &dst_port, &buffer_size, &src_port_start, &dst_ip, &src_ip, &validate, &fill_memory) < 0) {
+        return 1; // Exit if parsing failed
+    }
+
+    for (int src_port = src_port_start; src_port <= src_port_end; src_port++) {
+        printf("Running RDMA operation for source port: %d\n", src_port);
+        int ret = perform_rdma_operation(src_port, dst_port, buffer_size, dst_ip, src_ip, validate, fill_memory);
+        dst_port ++;
+        if (ret) {
+            fprintf(stderr, "RDMA operation failed for source port: %d\n", src_port);
+        }
+    }
+
+    return 0;
+}
+
+
+void compute_mr_hash(struct ibv_mr *mr, unsigned char *output) {
+    SHA256_CTX sha256;
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, mr->addr, mr->length);
+    SHA256_Final(output, &sha256);
+}
+
+// Function to print the hash
+void print_hash(const unsigned char *hash, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        printf("%02x", hash[i]);
+    }
+    printf("\n");
+}
+
+// Function to compare memory regions
+int print_mr_hashes(struct ibv_mr *mr1) {
+    unsigned char hash1[SHA256_DIGEST_LENGTH];
+
+    // Compute hashes for both memory regions
+    compute_mr_hash(mr1, hash1);
+
+    // Print the hashes for debugging
+    printf("Hash of MR1: ");
+    print_hash(hash1, SHA256_DIGEST_LENGTH);
+}
+
+void initialize_mr_random(struct ibv_mr *mr) {
+    if (!mr || !mr->addr || mr->length == 0) {
+        fprintf(stderr, "Invalid memory region.\n");
+        return;
+    }
+
+    uint8_t *buffer = (uint8_t *)mr->addr;
+    size_t length = mr->length;
+
+    // Seed the random number generator
+    srand(time(NULL));
+
+    // Fill the memory region with random bytes
+    for (size_t i = 0; i < length; i++) {
+        buffer[i] = rand() % 256; // Random byte (0-255)
+    }
+}
+
+int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, int *src_port, char **dst_ip,  char **src_ip, int *validate, int *fill_memory) {
+    int opt;
+    while ((opt = getopt(argc, argv, "d:s:p:r:i:vfh")) != -1) { // Added 'i' for IP address
+        switch (opt) {
+            case 'd': // Destination Port
+                *dst_port = atoi(optarg);
+                break;
+            case 's': // Buffer Size
+                *buffer_size = (size_t)atol(optarg);
+                break;
+            case 'p': // Source Port
+                *src_port = atoi(optarg);
+                break;
+            case 'r': // Destination IP
+                *dst_ip = optarg;
+                break;
+            case 'i': // Destination IP
+                *src_ip = optarg;
+                break;
+            case 'v': // Feature Flag
+                *validate = 1; // Enable feature if -f is present
+                break;
+            case 'f': // Feature Flag
+                *fill_memory = 1; // Enable feature if -f is present
+                break;
+            case 'h':
+                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
+                return -1;
+            default:
+                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
+                return -1;
+        }
+    }
+    return 0;
+}
+
