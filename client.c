@@ -154,15 +154,15 @@ int parse_config(const char *filename, int *flow_count, struct flow **flows) {
     return 0;  // Return success code
 }
 
-int connect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *dst_ip, char *src_ip, int validate, int fill_memory, struct queue_pair *qp_info) {
+int stablish_connection(struct flow flow_info, struct queue_pair *qp_info){
     int ret;
 
     // Bind the socket to the specific source port
     struct sockaddr_in src_addr;
     memset(&src_addr, 0, sizeof(src_addr));
     src_addr.sin_family = AF_INET;
-    src_addr.sin_port = htons(src_port);  // Set the desired source port
-    inet_pton(AF_INET, src_ip, &src_addr.sin_addr);
+    src_addr.sin_port = htons(flow_info.src_port);  // Set the desired source port
+    inet_pton(AF_INET, flow_info.src_ip, &src_addr.sin_addr);
 
     qp_info->ec = rdma_create_event_channel();
     if (!qp_info->ec) {
@@ -179,8 +179,8 @@ int connect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *ds
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(dst_port);
-    inet_pton(AF_INET, dst_ip, &addr.sin_addr);
+    addr.sin_port = htons(flow_info.dst_port);
+    inet_pton(AF_INET, flow_info.dst_ip, &addr.sin_addr);
 
     ret = rdma_resolve_addr(qp_info->id, (struct sockaddr *)&src_addr, (struct sockaddr *)&addr, 2000);
     if (ret) {
@@ -251,21 +251,8 @@ int connect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *ds
         return 1;
     }
 
-    qp_info->buffer = malloc(buffer_size);
+    qp_info->buffer = malloc(flow_info.buffer_size);
     strcpy(qp_info->buffer, "Hello from client");
-
-    qp_info->mr = ibv_reg_mr(qp_info->pd, qp_info->buffer, buffer_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-    if (!qp_info->mr) {
-        perror("ibv_reg_mr failed");
-        return 1;
-    }
-
-    if (fill_memory) {
-        initialize_mr_random(qp_info->mr);
-    }
-    if (validate) {
-        print_mr_hashes(qp_info->mr);
-    }
 
     memset(&qp_info->cm_params, 0, sizeof(qp_info->cm_params));
     qp_info->cm_params.initiator_depth = 1;
@@ -291,7 +278,24 @@ int connect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *ds
     rdma_ack_cm_event(qp_info->event);
 
     printf("Connected to server!\n");
+    return 0;
+}
 
+int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int validate, int fill_memory) {
+    int ret;
+    qp_info->mr = ibv_reg_mr(qp_info->pd, qp_info->buffer, flow_info.buffer_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    if (!qp_info->mr) {
+        perror("ibv_reg_mr failed");
+        return 1;
+    }
+
+    if (fill_memory) {
+        initialize_mr_random(qp_info->mr);
+    }
+    if (validate) {
+        print_mr_hashes(qp_info->mr);
+    }
+    
     struct ibv_send_wr wr, *bad_wr = NULL;
     struct ibv_sge sge;
 
@@ -303,7 +307,7 @@ int connect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *ds
     wr.send_flags = IBV_SEND_SIGNALED;
 
     sge.addr = (uintptr_t)qp_info->buffer;
-    sge.length = buffer_size;
+    sge.length = flow_info.buffer_size;
     sge.lkey = qp_info->mr->lkey;
 
     while (1) {
@@ -397,7 +401,8 @@ int main(int argc, char *argv[]) {
         fprintf(stdout ,"Buffer Size: %zu\n", buffer_size);
     }
 
-    connect_to_a_server(dst_port, buffer_size, src_port, dst_ip, src_ip, validate, fill_memory, &qp_info);
+    stablish_connection(flows[0], &qp_info);
+    connect_to_a_server(&qp_info, flows[0], validate, fill_memory);
 
     if (flow_count > 0){
         for (int i = 0; i < flow_count; i++) {
