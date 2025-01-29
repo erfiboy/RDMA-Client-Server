@@ -8,6 +8,23 @@
 #include <string.h>
 #include <stdio.h>
 
+// Arguments structure for threads
+typedef struct {
+    int dst_port;
+    size_t buffer_size;
+    char *server_ip;
+    int validate;
+} qp_thread_args;
+
+void *create_qp_thread(void *args) {
+    qp_thread_args *qp_args = (qp_thread_args *)args;
+    int ret = create_qp(qp_args->dst_port, qp_args->buffer_size, qp_args->server_ip, qp_args->validate);
+    if (ret != 0) {
+        fprintf(stderr, "create_qp failed for port %d\n", qp_args->dst_port);
+    }
+    return NULL;
+}
+
 // Function to compute hash for a memory region
 void compute_mr_hash(struct ibv_mr *mr, unsigned char *output) {
     SHA256_CTX sha256;
@@ -36,34 +53,95 @@ int print_mr_hashes(struct ibv_mr *mr1) {
     print_hash(hash1, SHA256_DIGEST_LENGTH);
 }
 
-int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, char **dst_ip,  int *validate) {
+int parse_arguments(int argc, char *argv[], int *dst_port, int **dst_ports, size_t *buffer_size, char **dst_ip, int *validate, int *number_of_qp) {
     int opt;
-    while ((opt = getopt(argc, argv, "p:s:i:h:v")) != -1) { // Added 'i' for IP address
+    int single_port = -1; // Store a single port if -d is used
+    char *port_list = NULL;
+
+    while ((opt = getopt(argc, argv, "p:P:s:i:q:h:v")) != -1) { 
         switch (opt) {
-            case 'p': // Destination Port
-                *dst_port = atoi(optarg);
+            case 'p': // Single Destination Port
+                if (port_list) {
+                    fprintf(stderr, "Error: Cannot use both -p and -P options.\n");
+                    return -1;
+                }
+                single_port = atoi(optarg);
                 break;
+
+            case 'P': // List of Destination Ports
+                if (single_port != -1) {
+                    fprintf(stderr, "Error: Cannot use both -p and -P options.\n");
+                    return -1;
+                }
+                port_list = optarg; // Store the raw string for later processing
+                break;
+
             case 's': // Buffer Size
                 *buffer_size = (size_t)atol(optarg);
                 break;
+
             case 'i': // Destination IP
                 *dst_ip = optarg;
                 break;
-            case 'h':
-                fprintf(stderr, "Usage: %s -p <dst-port> -s <buffer-size> -i <dst-ip> -v <validate> -h <help>\n", argv[0]);
+
+            case 'q': // Number of Queue Pairs
+                *number_of_qp = atoi(optarg);
                 break;
-            case 'v': // Feature Flag
-                *validate = 1; // Enable feature if -f is present
+
+            case 'v': // Enable validation
+                *validate = 1;
                 break;
+
+            case 'h': // Help message
             default:
-                fprintf(stderr, "Usage: %s -p <dst-port> -s <buffer-size> -i <dst-ip> -v <validate> -h <help>\n", argv[0]);
+                fprintf(stderr, "Usage: %s -d <dst-port> | -D <port1,port2,...> -s <buffer-size> -i <dst-ip> -q <number of QPs> -v -h\n", argv[0]);
                 return -1;
         }
     }
+
+    // Process the ports
+    if (single_port != -1) {
+        // Use single port mode
+        *dst_port = single_port;
+        *dst_ports = NULL; // Ensure list pointer is NULL
+    } else if (port_list) {
+        // Parse comma-separated list of ports
+        char *token;
+        int count = 0;
+        int *ports = malloc((*number_of_qp) * sizeof(int));
+        if (!ports) {
+            perror("malloc failed");
+            return -1;
+        }
+
+        token = strtok(port_list, ",");
+        while (token != NULL) {
+            if (count >= *number_of_qp) {
+                fprintf(stderr, "Error: Number of ports in -D does not match number_of_qp.\n");
+                free(ports);
+                return -1;
+            }
+            ports[count++] = atoi(token);
+            token = strtok(NULL, ",");
+        }
+
+        if (count != *number_of_qp) {
+            fprintf(stderr, "Error: Expected %d ports, but got %d.\n", *number_of_qp, count);
+            free(ports);
+            return -1;
+        }
+
+        *dst_ports = ports; // Assign parsed ports array
+        *dst_port = -1; // Indicate that -d was not used
+    } else {
+        fprintf(stderr, "Error: Either -d or -D must be specified.\n");
+        return -1;
+    }
+
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int create_qp(int dst_port, size_t buffer_size, char *server_ip, int validate){
     struct rdma_event_channel *ec = NULL;
     struct rdma_cm_id *listener = NULL, *id = NULL;
     struct rdma_cm_event *event = NULL;
@@ -75,15 +153,6 @@ int main(int argc, char *argv[]) {
     struct ibv_qp_init_attr qp_attr;
     char *buffer;
     int ret;
-
-    int dst_port = 23456;
-    size_t buffer_size = 1024 * 1024 * 100;
-    char *server_ip = "127.0.0.1"; // Default to localhost
-    int validate = 0;       // Feature disabled by default
-
-    if (parse_arguments(argc, argv, &dst_port, &buffer_size, &server_ip, &validate) < 0) {
-        return 1;
-    }
 
     ec = rdma_create_event_channel();
     if (!ec) {
@@ -208,44 +277,45 @@ int main(int argc, char *argv[]) {
     recv_wr.wr_id = (uintptr_t)buffer;
     recv_wr.sg_list = &sge;
     recv_wr.num_sge = 1;
-
-    ret = ibv_post_recv(id->qp, &recv_wr, &bad_recv_wr);
-    if (ret) {
-    fprintf(stderr, "ibv_post_recv failed: %d\n", ret);
-    return 1;
-    } else {
-        printf("Posted receive request successfully\n");
-    }
-    ret = ibv_req_notify_cq(cq, 0);
-    if (ret) {
-        perror("ibv_req_notify_cq failed");
+    while (1){
+        ret = ibv_post_recv(id->qp, &recv_wr, &bad_recv_wr);
+        if (ret) {
+        fprintf(stderr, "ibv_post_recv failed: %d\n", ret);
         return 1;
-    }
-
-    // Wait for completion
-    struct ibv_wc wc;
-    printf("Waiting for completion...\n");
-    while (1) {
-        ret = ibv_poll_cq(cq, 1, &wc);
-        if (ret < 0) {
-            perror("ibv_poll_cq failed");
-            break;
-        } else if (ret == 0) {
-            continue;  // No completion, keep polling
+        } else {
+            printf("Posted receive request successfully\n");
+        }
+        ret = ibv_req_notify_cq(cq, 0);
+        if (ret) {
+            perror("ibv_req_notify_cq failed");
+            return 1;
         }
 
-        if (wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr, "Completion with error, status: %s (%d), wr_id: %lu\n",
-                    ibv_wc_status_str(wc.status), wc.status, wc.wr_id);
-            break;
-        }
+        // Wait for completion
+        struct ibv_wc wc;
+        printf("Waiting for completion...\n");
+        while (1) {
+            ret = ibv_poll_cq(cq, 1, &wc);
+            if (ret < 0) {
+                perror("ibv_poll_cq failed");
+                break;
+            } else if (ret == 0) {
+                continue;  // No completion, keep polling
+            }
 
-        printf("Completion event received, wr_id: %lu, byte_len: %u\n",
-               wc.wr_id, wc.byte_len);
-        break;  // Exit after processing one successful completion
-    }
-    if (validate){
-        print_mr_hashes(mr);
+            if (wc.status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Completion with error, status: %s (%d), wr_id: %lu\n",
+                        ibv_wc_status_str(wc.status), wc.status, wc.wr_id);
+                break;
+            }
+
+            printf("Completion event received, wr_id: %lu, byte_len: %u\n",
+                wc.wr_id, wc.byte_len);
+            break;  // Exit after processing one successful completion
+        }
+        if (validate){
+            print_mr_hashes(mr);
+        }
     }
     // to complete
     rdma_disconnect(id);
@@ -258,5 +328,50 @@ int main(int argc, char *argv[]) {
     ibv_dealloc_pd(pd);
     rdma_destroy_event_channel(ec);
 
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    size_t buffer_size = 1024 * 1024 * 100; // Default buffer size
+    char *server_ip = "127.0.0.1";        // Default to localhost
+    int dst_port = 0;                   // Base port
+    int* dst_ports_list;
+    int validate = -1;                       // Default to feature disabled
+    int number_of_qp = 3;
+    int ret;
+
+    // Parse arguments
+    if (parse_arguments(argc, argv, &dst_port, &dst_ports_list, &buffer_size, &server_ip, &validate, &number_of_qp) < 0) {
+        return 1;
+    }
+
+    pthread_t threads[number_of_qp];
+    qp_thread_args args[number_of_qp];
+
+    // Create threads for each call to create_qp
+    for (int i = 0; i < number_of_qp; i++) {
+        if (dst_port != -1){
+            args[i].dst_port = dst_port + i;
+        } else {
+            args[i].dst_port = dst_ports_list[i];
+        }
+        args[i].buffer_size = buffer_size;
+        args[i].server_ip = server_ip;
+        args[i].validate = validate;
+
+        ret = pthread_create(&threads[i], NULL, create_qp_thread, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Failed to create thread for port %d\n", args[i].dst_port);
+            return 1;
+        }
+        fprintf(stdout, "QP is listening on port %d\n", args[i].dst_port);
+    }
+
+    // Wait for all threads to finish
+    for (int i = 0; i < 3; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    printf("All QPs created successfully.\n");
     return 0;
 }
