@@ -7,7 +7,7 @@ This project implements an RDMA (Remote Direct Memory Access) client-server appl
 ## Usage
 ### Server
 ```bash
-Usage: ./server -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>
+Usage: ./server -d <dst-port> -s <buffer-size> -p <source-port> -P <source-ports> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>
 ```
 
 ### client
@@ -25,6 +25,7 @@ Usage: ./client -p <dst-port> -s <buffer-size> -i <dst-ip> -v <validate> -h <hel
 - **`-h <help>`**: Displays the usage information.
 
 ### Server-Specific Options
+- **`-P <dst-port>`**: Specifies a list of comma seprated ports.
 - **`-d <dst-port>`**: Specifies the listening port for incoming connections.
 - **`-r <remote-ip>`**: Sets the remote IP address for RDMA communication.
 - **`-f <fill memory with random byte>`**: If set, fills the memory region with random bytes.
