@@ -262,24 +262,46 @@ int main(int argc, char *argv[]) {
     sge.addr = (uintptr_t)buffer;
     sge.length = buffer_size;
     sge.lkey = mr->lkey;
+    while (1){
+        char c = getchar();  // Waits for user input
+        if (c != '\n')  // Ignores Enter key presses
+            break;
 
-    ret = ibv_post_send(id->qp, &wr, &bad_wr);
-    if (ret) {
-        perror("ibv_post_send failed");
-        return 1;
-    }
+        struct timespec start, end;
 
-    struct ibv_wc wc;
-    while ((ret = ibv_poll_cq(cq, 1, &wc)) == 0);
+        // Record the start time
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        ret = ibv_post_send(id->qp, &wr, &bad_wr);
+        if (ret) {
+            perror("ibv_post_send failed");
+            return 1;
+        }
 
-    if (ret < 0) {
-        perror("ibv_poll_cq failed");
-        return 1;
-    }
+        struct ibv_wc wc;
+        while ((ret = ibv_poll_cq(cq, 1, &wc)) == 0);
 
-    if (wc.status != IBV_WC_SUCCESS) {
-        fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int) wc.wr_id);
-        return 1;
+        if (ret < 0) {
+            perror("ibv_poll_cq failed");
+            return 1;
+        }
+
+        if (wc.status != IBV_WC_SUCCESS) {
+            fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int) wc.wr_id);
+            return 1;
+        }
+        // Record the end time
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        // Calculate elapsed time in nanoseconds
+        long seconds = end.tv_sec - start.tv_sec;
+        long nanoseconds = end.tv_nsec - start.tv_nsec;
+        long elapsed_ns = seconds * 1e9 + nanoseconds;  // Total time in nanoseconds
+
+        // Convert to milliseconds
+        double elapsed_ms = (double)elapsed_ns / 1e6;
+
+        // Print the elapsed time in nanoseconds and milliseconds
+        printf("Elapsed time: %ld nanoseconds (%.3f milliseconds)\n", elapsed_ns, elapsed_ms);
     }
 
     printf("Message sent to server!\n");
