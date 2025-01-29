@@ -286,54 +286,42 @@ int send_chunk(struct queue_pair *qp_info, struct flow flow_info, struct ibv_sen
     int ret;
 
     struct ibv_send_wr *bad_wr = NULL;
-    fprintf(stdout, "I am here\n");
-    while (1) {
-        char c = getchar();  // Waits for user input
-        if (c != '\n')  // Ignores Enter key presses
-            break;
 
-        struct timespec start, end;
+    struct timespec start, end;
 
-        // Record the start time
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        ret = ibv_post_send(qp_info->id->qp, wr, &bad_wr);
-        if (ret) {
-            perror("ibv_post_send failed");
-            return 1;
-        }
-        fprintf(stdout, "I am here\n");
+    // Record the start time
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    ret = ibv_post_send(qp_info->id->qp, wr, &bad_wr);
+    if (ret) {
+        perror("ibv_post_send failed");
+        return 1;
+    }
+    struct ibv_wc wc;
+    while ((ret = ibv_poll_cq(qp_info->cq, 1, &wc)) == 0);
 
-        struct ibv_wc wc;
-        while ((ret = ibv_poll_cq(qp_info->cq, 1, &wc)) == 0);
-
-        if (ret < 0) {
-            perror("ibv_poll_cq failed");
-            return 1;
-        }
-
-        if (wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
-            return 1;
-        }
-        fprintf(stdout, "I am here\n");
-
-        // Record the end time
-        clock_gettime(CLOCK_MONOTONIC, &end);
-
-        // Calculate elapsed time in nanoseconds
-        long seconds = end.tv_sec - start.tv_sec;
-        long nanoseconds = end.tv_nsec - start.tv_nsec;
-        long elapsed_ns = seconds * 1e9 + nanoseconds;  // Total time in nanoseconds
-
-        // Convert to milliseconds
-        double elapsed_ms = (double)elapsed_ns / 1e6;
-
-        // Print the elapsed time in nanoseconds and milliseconds
-        printf("Elapsed time: %ld nanoseconds (%.3f milliseconds)\n", elapsed_ns, elapsed_ms);
-        break;
+    if (ret < 0) {
+        perror("ibv_poll_cq failed");
+        return 1;
     }
 
-    printf("Message sent to server!\n");
+    if (wc.status != IBV_WC_SUCCESS) {
+        fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
+        return 1;
+    }
+
+    // Record the end time
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    // Calculate elapsed time in nanoseconds
+    long seconds = end.tv_sec - start.tv_sec;
+    long nanoseconds = end.tv_nsec - start.tv_nsec;
+    long elapsed_ns = seconds * 1e9 + nanoseconds;  // Total time in nanoseconds
+
+    // Convert to milliseconds
+    double elapsed_ms = (double)elapsed_ns / 1e6;
+
+    // Print the elapsed time in nanoseconds and milliseconds
+    printf("Elapsed time: %ld nanoseconds (%.3f milliseconds)\n", elapsed_ns, elapsed_ms);
 
     return 0;
 }
@@ -459,9 +447,11 @@ int main(int argc, char *argv[]) {
     allocate_mr(&qp_info, &wr_data, validate, fill_memory);
     allocate_mr_probe(&qp_info, &wr, validate, fill_memory);
 
+    for (int i = 0; i < buffer_size; i += DATA_SIZE) {
+        send_chunk(&qp_info, flows[0], &wr_data);
+    }
     send_chunk(&qp_info, flows[0], &wr);
     send_chunk(&qp_info, flows[0], &wr);
-    send_chunk(&qp_info, flows[0], &wr_data);
 
     destroy_qp(&qp_info);
 

@@ -313,9 +313,6 @@ int create_qp(int dst_port, size_t buffer_size, char *server_ip, int validate){
                 wc.wr_id, wc.byte_len);
             break;  // Exit after processing one successful completion
         }
-        if (validate){
-            print_mr_hashes(mr);
-        }
     }
     // to complete
     rdma_disconnect(id);
