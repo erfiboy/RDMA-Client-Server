@@ -8,6 +8,15 @@
 #include <string.h>
 #include <stdio.h>
 
+struct flow {
+    int dst_port;
+    size_t buffer_size;
+    int src_port;
+    char *dst_ip;
+    char *src_ip;
+    struct timespec timestamp; 
+};
+
 // Function to compute hash for a memory region
 void compute_mr_hash(struct ibv_mr *mr, unsigned char *output) {
     SHA256_CTX sha256;
@@ -54,10 +63,14 @@ void initialize_mr_random(struct ibv_mr *mr) {
     }
 }
 
-int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, int *src_port, char **dst_ip,  char **src_ip, int *validate, int *fill_memory) {
+int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, int *src_port, char **dst_ip,  char **src_ip, char **filename, int *validate, int *fill_memory) {
     int opt;
-    while ((opt = getopt(argc, argv, "d:s:p:r:i:vfh")) != -1) { // Added 'i' for IP address
+    while ((opt = getopt(argc, argv, "F:d:s:p:r:i:vfh")) != -1) { // Added 'i' for IP address
         switch (opt) {
+            case 'F':
+                *filename = optarg;
+                return 1;
+                break;
             case 'd': // Destination Port
                 *dst_port = atoi(optarg);
                 break;
@@ -80,17 +93,54 @@ int parse_arguments(int argc, char *argv[], int *dst_port, size_t *buffer_size, 
                 *fill_memory = 1; // Enable feature if -f is present
                 break;
             case 'h':
-                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
+                fprintf(stderr, "Usage: %s -F <config file> -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
                 return -1;
             default:
-                fprintf(stderr, "Usage: %s -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
+                fprintf(stderr, "Usage: %s -F <config file> -d <dst-port> -s <buffer-size> -p <source-port> -i <src-ip> -r <remote-ip> -v <validate> -f <fill memory with random byte> -h <help>\n", argv[0]);
                 return -1;
         }
     }
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int parse_config(const char *filename, int *flow_count, struct flow **flows) {
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        perror("Could not open file");
+        return -1;  // Return error code if file cannot be opened
+    }
+
+    // Read the number of flows from the first line
+    fscanf(file, "%d", flow_count);
+
+    // Allocate memory for the array of flows
+    *flows = malloc(sizeof(struct flow) * (*flow_count));
+    if (*flows == NULL) {
+        perror("Memory allocation failed");
+        fclose(file);
+        return -1;  // Return error code if memory allocation fails
+    }
+
+    // Read the flow information
+    for (int i = 0; i < *flow_count; i++) {
+        (*flows)[i].dst_ip = malloc(16 * sizeof(char));  // Allocate space for IP address
+        (*flows)[i].src_ip = malloc(16 * sizeof(char));  // Allocate space for IP address
+        
+        // Read the details for each flow
+        fscanf(file, "%s %s %d %d %zu %ld", 
+                (*flows)[i].dst_ip, (*flows)[i].src_ip, 
+                &(*flows)[i].src_port, &(*flows)[i].dst_port, 
+                &(*flows)[i].buffer_size, &(*flows)[i].timestamp.tv_sec);
+
+        // Convert the timestamp to timespec structure
+        (*flows)[i].timestamp.tv_nsec = (long)(((*flows)[i].timestamp.tv_sec - (long)(*flows)[i].timestamp.tv_sec) * 1000000000);
+    }
+
+    fclose(file);
+    return 0;  // Return success code
+}
+
+int coonect_to_a_server(int dst_port, size_t buffer_size, int src_port, char *dst_ip, char *src_ip, int validate, int fill_memory){
     struct rdma_event_channel *ec = NULL;
     struct rdma_cm_id *id = NULL;
     struct rdma_cm_event *event = NULL;
@@ -102,17 +152,6 @@ int main(int argc, char *argv[]) {
     struct ibv_qp_init_attr qp_attr;
     char *buffer;
     int ret;
-
-    int dst_port = 23456;
-    size_t buffer_size = 1024 * 1024 * 100;
-    int src_port = 12345;
-    char *dst_ip = "127.0.0.1"; // Default to localhost
-    char *src_ip = "127.0.0.1"; // Default to localhost
-    int validate = 0, fill_memory = 0;
-
-    if (parse_arguments(argc, argv, &dst_port, &buffer_size, &src_port, &dst_ip, &src_ip, &validate, &fill_memory) < 0) {
-        return 1; // Exit if parsing failed
-    }
 
     // Bind the socket to the specific source port
     struct sockaddr_in src_addr;
@@ -315,6 +354,51 @@ int main(int argc, char *argv[]) {
     ibv_destroy_comp_channel(comp_chan);
     ibv_dealloc_pd(pd);
     rdma_destroy_event_channel(ec);
+
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    int dst_port = 23456;
+    size_t buffer_size = 1024 * 1024 * 100;
+    int src_port = 12345;
+    char *dst_ip = "127.0.0.1"; // Default to localhost
+    char *src_ip = "127.0.0.1"; // Default to localhost
+    char *flow_file;
+    int validate = 0, fill_memory = 0;
+    int flow_count = 0;
+    struct flow *flows = NULL;
+
+    int result = parse_arguments(argc, argv, &dst_port, &buffer_size, &src_port, &dst_ip, &src_ip, &flow_file, &validate, &fill_memory);
+    if (result < 0) {
+        return 1; // Exit if parsing failed
+    } else if (result == 1) {
+        if (parse_config("config.txt", &flow_count, &flows) != 0) {
+            return 1;  // Return error if parsing failed
+        }
+        dst_port = flows[0].dst_port;
+        buffer_size = flows[0].buffer_size;
+        src_port = flows[0].src_port;
+        dst_ip = flows[0].dst_ip;
+        src_ip = flows[0].src_ip;
+
+        fprintf(stdout ,"Connecting to server...\n");
+        fprintf(stdout ,"Destination IP: %s\n", dst_ip);
+        fprintf(stdout ,"Source IP: %s\n", src_ip);
+        fprintf(stdout ,"Source Port: %d\n", src_port);
+        fprintf(stdout ,"Destination Port: %d\n", dst_port);
+        fprintf(stdout ,"Buffer Size: %zu\n", buffer_size);
+    }
+
+    coonect_to_a_server(dst_port, buffer_size, src_port, dst_ip, src_ip, validate, fill_memory);
+
+    if (flow_count > 0){
+        for (int i = 0; i < flow_count; i++) {
+            free(flows[i].dst_ip);
+            free(flows[i].src_ip);
+        }
+        free(flows);
+    }
 
     return 0;
 }
