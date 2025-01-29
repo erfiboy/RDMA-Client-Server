@@ -8,6 +8,9 @@
 #include <string.h>
 #include <stdio.h>
 
+#define PROBE_SIZE 1024
+#define DATA_SIZE 1000000
+
 struct flow {
     int dst_port;
     size_t buffer_size;
@@ -24,11 +27,12 @@ struct queue_pair{
     struct rdma_conn_param cm_params;
     struct ibv_pd *pd;
     struct ibv_mr *mr;
+    struct ibv_mr *mr_probe;
     struct ibv_comp_channel *comp_chan;
     struct ibv_cq *cq;
     struct ibv_qp_init_attr qp_attr;
     char *buffer;
-    char *probe;
+    char *probe_buffer;
 };
 
 // Function to compute hash for a memory region
@@ -251,9 +255,6 @@ int stablish_connection(struct flow flow_info, struct queue_pair *qp_info){
         return 1;
     }
 
-    qp_info->buffer = malloc(flow_info.buffer_size);
-    strcpy(qp_info->buffer, "Hello from client");
-
     memset(&qp_info->cm_params, 0, sizeof(qp_info->cm_params));
     qp_info->cm_params.initiator_depth = 1;
     qp_info->cm_params.responder_resources = 1;
@@ -281,35 +282,11 @@ int stablish_connection(struct flow flow_info, struct queue_pair *qp_info){
     return 0;
 }
 
-int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int validate, int fill_memory) {
+int send_chunk(struct queue_pair *qp_info, struct flow flow_info, struct ibv_send_wr *wr) {
     int ret;
-    qp_info->mr = ibv_reg_mr(qp_info->pd, qp_info->buffer, flow_info.buffer_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-    if (!qp_info->mr) {
-        perror("ibv_reg_mr failed");
-        return 1;
-    }
 
-    if (fill_memory) {
-        initialize_mr_random(qp_info->mr);
-    }
-    if (validate) {
-        print_mr_hashes(qp_info->mr);
-    }
-    
-    struct ibv_send_wr wr, *bad_wr = NULL;
-    struct ibv_sge sge;
-
-    memset(&wr, 0, sizeof(wr));
-    wr.wr_id = (uintptr_t)qp_info->buffer;
-    wr.opcode = IBV_WR_SEND;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-    wr.send_flags = IBV_SEND_SIGNALED;
-
-    sge.addr = (uintptr_t)qp_info->buffer;
-    sge.length = flow_info.buffer_size;
-    sge.lkey = qp_info->mr->lkey;
-
+    struct ibv_send_wr *bad_wr = NULL;
+    fprintf(stdout, "I am here\n");
     while (1) {
         char c = getchar();  // Waits for user input
         if (c != '\n')  // Ignores Enter key presses
@@ -319,11 +296,12 @@ int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int v
 
         // Record the start time
         clock_gettime(CLOCK_MONOTONIC, &start);
-        ret = ibv_post_send(qp_info->id->qp, &wr, &bad_wr);
+        ret = ibv_post_send(qp_info->id->qp, wr, &bad_wr);
         if (ret) {
             perror("ibv_post_send failed");
             return 1;
         }
+        fprintf(stdout, "I am here\n");
 
         struct ibv_wc wc;
         while ((ret = ibv_poll_cq(qp_info->cq, 1, &wc)) == 0);
@@ -337,6 +315,7 @@ int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int v
             fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
             return 1;
         }
+        fprintf(stdout, "I am here\n");
 
         // Record the end time
         clock_gettime(CLOCK_MONOTONIC, &end);
@@ -351,10 +330,83 @@ int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int v
 
         // Print the elapsed time in nanoseconds and milliseconds
         printf("Elapsed time: %ld nanoseconds (%.3f milliseconds)\n", elapsed_ns, elapsed_ms);
+        break;
     }
 
     printf("Message sent to server!\n");
 
+    return 0;
+}
+
+int allocate_mr(struct queue_pair *qp_info, struct ibv_send_wr *wr, int validate, int fill_memory) {
+    qp_info->buffer = malloc(DATA_SIZE);
+
+    qp_info->mr = ibv_reg_mr(qp_info->pd, qp_info->buffer, DATA_SIZE, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    if (!qp_info->mr) {
+        perror("ibv_reg_mr failed");
+        return 1;
+    }
+
+    if (fill_memory) {
+        initialize_mr_random(qp_info->mr);
+    }
+    if (validate) {
+        print_mr_hashes(qp_info->mr);
+    }
+    struct ibv_sge *sge = malloc(sizeof(struct ibv_sge));
+    if (!sge) {
+        perror("malloc failed");
+        return 1;  // Handle allocation failure
+    }
+    sge->addr = (uintptr_t)qp_info->buffer;
+    sge->length = DATA_SIZE;
+    sge->lkey = qp_info->mr->lkey;
+
+    memset(wr, 0, sizeof(wr));
+    wr->wr_id = (uintptr_t)qp_info->buffer;
+    wr->opcode = IBV_WR_SEND;
+    wr->sg_list = sge;
+    wr->num_sge = 1;
+    wr->send_flags = IBV_SEND_SIGNALED;
+
+    return 1;
+}
+
+int allocate_mr_probe(struct queue_pair *qp_info, struct ibv_send_wr *wr, int validate, int fill_memory) {
+    qp_info->probe_buffer = malloc(PROBE_SIZE);
+
+    qp_info->mr_probe = ibv_reg_mr(qp_info->pd, qp_info->probe_buffer, PROBE_SIZE, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    if (!qp_info->mr) {
+        perror("ibv_reg_mr failed");
+        return 1;
+    }
+
+    if (fill_memory) {
+        initialize_mr_random(qp_info->mr_probe);
+    }
+    if (validate) {
+        print_mr_hashes(qp_info->mr_probe);
+    }
+    struct ibv_sge *sge = malloc(sizeof(struct ibv_sge));
+    if (!sge) {
+        perror("malloc failed");
+        return 1;  // Handle allocation failure
+    }
+    sge->addr = (uintptr_t)qp_info->probe_buffer;
+    sge->length = PROBE_SIZE;
+    sge->lkey = qp_info->mr_probe->lkey;
+
+    memset(wr, 0, sizeof(wr));
+    wr->wr_id = (uintptr_t)qp_info->probe_buffer;
+    wr->opcode = IBV_WR_SEND;
+    wr->sg_list = sge;
+    wr->num_sge = 1;
+    wr->send_flags = IBV_SEND_SIGNALED;
+
+    return 1;
+}
+
+int destroy_qp(struct queue_pair *qp_info){
     rdma_disconnect(qp_info->id);
     rdma_destroy_qp(qp_info->id);
     ibv_dereg_mr(qp_info->mr);
@@ -364,10 +416,8 @@ int connect_to_a_server(struct queue_pair *qp_info, struct flow flow_info, int v
     ibv_destroy_comp_channel(qp_info->comp_chan);
     ibv_dealloc_pd(qp_info->pd);
     rdma_destroy_event_channel(qp_info->ec);
-
-    return 0;
+    return 1;
 }
-
 
 int main(int argc, char *argv[]) {
     int dst_port = 23456;
@@ -401,8 +451,19 @@ int main(int argc, char *argv[]) {
         fprintf(stdout ,"Buffer Size: %zu\n", buffer_size);
     }
 
+    struct ibv_send_wr wr;
+    struct ibv_send_wr wr_data;
+
     stablish_connection(flows[0], &qp_info);
-    connect_to_a_server(&qp_info, flows[0], validate, fill_memory);
+
+    allocate_mr(&qp_info, &wr_data, validate, fill_memory);
+    allocate_mr_probe(&qp_info, &wr, validate, fill_memory);
+
+    send_chunk(&qp_info, flows[0], &wr);
+    send_chunk(&qp_info, flows[0], &wr);
+    send_chunk(&qp_info, flows[0], &wr_data);
+
+    destroy_qp(&qp_info);
 
     if (flow_count > 0){
         for (int i = 0; i < flow_count; i++) {
@@ -411,6 +472,8 @@ int main(int argc, char *argv[]) {
         }
         free(flows);
     }
+    free(wr.sg_list);
+    free(wr_data.sg_list);
 
     return 0;
 }
